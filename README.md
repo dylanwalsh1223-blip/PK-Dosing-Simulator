@@ -16,6 +16,7 @@ An interactive web app that models how drug concentration in the bloodstream cha
 - Adjusts elimination rate for reduced kidney/liver function, and supports weight-based (mg/kg) dosing
 - Lets the user compare two drugs side-by-side to see how their absorption and elimination profiles differ
 - Generates a plain-language explanation of each result — whether a dosing schedule is safe, ineffective, or risks toxicity, and why
+- Backed by an automated test suite (pytest) that checks the model against known analytical values
 
 ## Why I built this
 
@@ -28,6 +29,7 @@ I'm interested in studying biomedical engineering, and I wanted a project that c
 - **SciPy** — solving differential equations (`solve_ivp`) and fitting the model to real data (`curve_fit`)
 - **Streamlit** — turns the model into an interactive web app
 - **Plotly** — interactive charting with shaded therapeutic window ranges
+- **pytest** — automated tests verifying the model's numerical accuracy
 
 ## How it works, briefly
 
@@ -37,6 +39,15 @@ The core model is a two-compartment ODE system:
     dC/dt = ka * A - k * C
 
 where `A` is drug remaining in the gut, `C` is drug concentration in the blood, `ka` is the absorption rate, and `k` is the elimination rate. Multiple doses are simulated by solving this system in sequence, adding a new dose to the gut compartment at each dosing interval and carrying the ending state forward into the next interval.
+
+## Data & references
+
+The compartment modeling approach and the Michaelis-Menten (saturable) elimination model used in this project are standard pharmacokinetics concepts, described in:
+
+- Gibaldi, M. and Perrier, D. *Pharmacokinetics*, 2nd ed. Marcel Dekker, New York, 1982.
+- NCBI Bookshelf, StatPearls: ["Elimination Half-Life of Drugs"](https://www.ncbi.nlm.nih.gov/books/NBK554498/), National Library of Medicine, National Institutes of Health.
+
+Drug-specific absorption rates, elimination rates, and therapeutic window values used as presets in this app are educational approximations, estimated from published elimination half-life ranges for each drug and converted into rate constants for demonstration purposes. They are not sourced from patient-specific clinical data and should not be used for real dosing decisions.
 
 ## Disclaimer
 
