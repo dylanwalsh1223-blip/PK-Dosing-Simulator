@@ -14,6 +14,19 @@ def iv_model(t, C, k):
     dC_dt = -k * C[0]
     return [dC_dt]
 
+def two_compartment_iv_model(t, y, k10, k12, k21):
+    A1, A2 = y
+    dA1_dt = -k10 * A1 - k12 * A1 + k21 * A2
+    dA2_dt = k12 * A1 - k21 * A2
+    return [dA1_dt, dA2_dt]
+
+def two_compartment_oral_model(t, y, ka, k10, k12, k21):
+    A0, A1, A2 = y
+    dA0_dt = -ka * A0
+    dA1_dt = ka * A0 - k10 * A1 - k12 * A1 + k21 * A2
+    dA2_dt = k12 * A1 - k21 * A2
+    return [dA0_dt, dA1_dt, dA2_dt]
+
 def compute_pk_curve_oral(ka, k, dose_amount, dose_interval, num_doses):
     times_list = []
     blood_list = []
@@ -60,6 +73,46 @@ def compute_pk_curve_iv(k, dose_amount, dose_interval, num_doses):
 
     return times_list, blood_list, peak_per_dose
 
+def compute_two_compartment_curve(route, ka, k10, k12, k21, volume_central, dose_amount, dose_interval, num_doses):
+    times_list = []
+    concentration_list = []
+    peak_per_dose = []
+
+    if route == "Oral":
+        current_state = [0, 0, 0]
+    else:
+        current_state = [0, 0]
+
+    for dose_number in range(num_doses):
+        start_time = dose_number * dose_interval
+        end_time = start_time + dose_interval
+        t_segment = np.linspace(start_time, end_time, 50)
+
+        current_state[0] = current_state[0] + dose_amount
+
+        if route == "Oral":
+            segment_solution = solve_ivp(two_compartment_oral_model, [start_time, end_time], current_state, args=(ka, k10, k12, k21), t_eval=t_segment)
+            central_amount = segment_solution.y[1]
+            peripheral_amount = segment_solution.y[2]
+            final_absorption = segment_solution.y[0][-1]
+        else:
+            segment_solution = solve_ivp(two_compartment_iv_model, [start_time, end_time], current_state, args=(k10, k12, k21), t_eval=t_segment)
+            central_amount = segment_solution.y[0]
+            peripheral_amount = segment_solution.y[1]
+
+        central_concentration = central_amount / volume_central
+
+        times_list.extend(t_segment)
+        concentration_list.extend(central_concentration)
+        peak_per_dose.append(max(central_concentration))
+
+        if route == "Oral":
+            current_state = [final_absorption, central_amount[-1], peripheral_amount[-1]]
+        else:
+            current_state = [central_amount[-1], peripheral_amount[-1]]
+
+    return times_list, concentration_list, peak_per_dose
+
 def compute_pk_metrics(times_list, blood_list, k):
     times_array = np.array(times_list)
     blood_array = np.array(blood_list)
@@ -97,13 +150,16 @@ def find_steady_state_dose(peak_per_dose, dose_interval):
 
     return steady_state_dose_number, steady_state_time
 
-def explain_single_drug(drug_name, route, max_concentration, therapeutic_min, therapeutic_max, kidney_function, dose_amount, dose_interval, num_doses, steady_state_dose_number, steady_state_time):
+def explain_single_drug(drug_name, route, max_concentration, therapeutic_min, therapeutic_max, kidney_function, dose_amount, dose_interval, num_doses, steady_state_dose_number, steady_state_time, model_type):
     lines = []
 
     lines.append("With " + str(num_doses) + " " + route + " doses of " + str(round(dose_amount, 1)) + " mg given every " + str(dose_interval) + " hours, " + drug_name + " reaches a peak blood concentration of " + str(round(max_concentration, 2)) + " mg/L.")
 
     if route == "IV":
         lines.append("Since this is given intravenously, the drug enters the bloodstream immediately with no absorption delay — the peak concentration happens right at the moment of each dose, unlike an oral dose which takes time to be absorbed first.")
+
+    if model_type == "Two-compartment":
+        lines.append("This uses a two-compartment model, meaning the drug distributes between the bloodstream (central compartment) and the body's tissues (peripheral compartment). This produces a faster initial drop as the drug distributes into tissue, followed by a slower decline as it's eliminated — a more realistic pattern than a single well-mixed compartment for many real drugs.")
 
     if max_concentration > therapeutic_max:
         lines.append("This peak is above the therapeutic window (max " + str(therapeutic_max) + " mg/L), meaning the drug is building up faster than the body can clear it — a sign of possible toxicity. This could be lowered by increasing the time between doses, reducing the dose amount, or both.")
@@ -181,81 +237,94 @@ st.divider()
 col1, col2 = st.columns([1, 2])
 
 with col1:
-    st.subheader("Route of administration")
-    route = st.radio("Route", ["Oral", "IV"], horizontal=True)
+    tab_setup, tab_patient, tab_loading, tab_compare, tab_window = st.tabs(["Setup", "Patient", "Loading Dose", "Compare", "Window"])
 
-    st.subheader("Drug and dosing")
+    with tab_setup:
+        model_type = st.radio("Model type", ["One-compartment", "Two-compartment"], horizontal=True)
+        if model_type == "Two-compartment":
+            st.caption("Models the drug distributing between the bloodstream and body tissue, not just a single well-mixed space.")
 
-    selected_drug = st.selectbox("Drug", list(drug_presets.keys()))
-    preset = drug_presets[selected_drug]
+        route = st.radio("Route", ["Oral", "IV"], horizontal=True)
 
-    if selected_drug == "Custom (set your own values)":
-        ka = st.slider("Absorption rate (ka)", min_value=0.1, max_value=2.0, value=preset["ka"])
-        k = st.slider("Elimination rate (k)", min_value=0.01, max_value=0.5, value=preset["k"])
-    else:
-        ka = preset["ka"]
-        k = preset["k"]
-        st.write("Absorption rate (ka):", ka)
-        st.write("Elimination rate (k):", k)
+        selected_drug = st.selectbox("Drug", list(drug_presets.keys()))
+        preset = drug_presets[selected_drug]
 
-    if route == "IV":
-        st.caption("IV bypasses absorption — the drug enters the bloodstream immediately, so ka is not used.")
+        if selected_drug == "Custom (set your own values)":
+            ka = st.slider("Absorption rate (ka)", min_value=0.1, max_value=2.0, value=preset["ka"])
+            k = st.slider("Elimination rate (k)", min_value=0.01, max_value=0.5, value=preset["k"])
+        else:
+            ka = preset["ka"]
+            k = preset["k"]
+            st.write("Absorption rate (ka):", ka)
+            st.write("Elimination rate (k):", k)
 
-    st.subheader("Patient factors")
+        if route == "IV":
+            st.caption("IV bypasses absorption — the drug enters the bloodstream immediately, so ka is not used.")
 
-    weight_kg = st.slider("Patient weight (kg)", min_value=10, max_value=150, value=70)
+        if model_type == "Two-compartment":
+            st.write("**Distribution parameters**")
+            k12 = st.slider("Central → peripheral rate (k12)", min_value=0.01, max_value=1.0, value=0.3)
+            k21 = st.slider("Peripheral → central rate (k21)", min_value=0.01, max_value=1.0, value=0.2)
+            volume_central = st.slider("Central compartment volume, V1 (L)", min_value=5.0, max_value=50.0, value=20.0)
 
-    use_weight_dosing = st.checkbox("Scale dose by weight (mg/kg)")
+        dose_interval = st.slider("Hours between doses", min_value=2, max_value=24, value=8)
+        num_doses = st.slider("Number of doses", min_value=1, max_value=20, value=6)
 
-    if use_weight_dosing:
-        dose_per_kg = st.slider("Dose per kg (mg/kg)", min_value=0.5, max_value=10.0, value=1.5)
-        dose_amount = dose_per_kg * weight_kg
-        st.write("Calculated dose:", round(dose_amount, 1), "mg")
-    else:
-        dose_amount = st.slider("Dose amount (mg)", min_value=50, max_value=500, value=100)
+    with tab_patient:
+        weight_kg = st.slider("Patient weight (kg)", min_value=10, max_value=150, value=70)
 
-    kidney_function = st.selectbox("Kidney/liver function", list(kidney_function_multipliers.keys()))
-    kidney_multiplier = kidney_function_multipliers[kidney_function]
-    k_adjusted = k * kidney_multiplier
+        use_weight_dosing = st.checkbox("Scale dose by weight (mg/kg)")
 
-    if kidney_function != "Normal":
-        st.write("Adjusted elimination rate (k):", round(k_adjusted, 4))
+        if use_weight_dosing:
+            dose_per_kg = st.slider("Dose per kg (mg/kg)", min_value=0.5, max_value=10.0, value=1.5)
+            dose_amount = dose_per_kg * weight_kg
+            st.write("Calculated dose:", round(dose_amount, 1), "mg")
+        else:
+            dose_amount = st.slider("Dose amount (mg)", min_value=50, max_value=500, value=100)
 
-    dose_interval = st.slider("Hours between doses", min_value=2, max_value=24, value=8)
-    num_doses = st.slider("Number of doses", min_value=1, max_value=20, value=6)
+        kidney_function = st.selectbox("Kidney/liver function", list(kidney_function_multipliers.keys()))
+        kidney_multiplier = kidney_function_multipliers[kidney_function]
+        k_adjusted = k * kidney_multiplier
 
-    st.subheader("Loading dose calculator")
-    st.caption("A loading dose is a larger first dose used to reach a target concentration immediately, instead of waiting several half-lives to build up.")
+        if kidney_function != "Normal":
+            st.write("Adjusted elimination rate (k):", round(k_adjusted, 4))
 
-    target_concentration = st.slider("Target concentration (mg/L)", min_value=0.1, max_value=50.0, value=float(preset["therapeutic_min"]))
-    volume_of_distribution = st.slider("Volume of distribution, Vd (L)", min_value=5.0, max_value=100.0, value=40.0)
+    with tab_loading:
+        st.caption("A loading dose is a larger first dose used to reach a target concentration immediately, instead of waiting several half-lives to build up.")
 
-    loading_dose = compute_loading_dose(target_concentration, volume_of_distribution)
+        target_concentration = st.slider("Target concentration (mg/L)", min_value=0.1, max_value=50.0, value=float(preset["therapeutic_min"]))
+        volume_of_distribution = st.slider("Volume of distribution, Vd (L)", min_value=5.0, max_value=100.0, value=40.0)
 
-    st.metric("Calculated loading dose", str(round(loading_dose, 1)) + " mg")
-    st.caption("Loading dose = target concentration × volume of distribution")
+        loading_dose = compute_loading_dose(target_concentration, volume_of_distribution)
 
-    st.subheader("Compare drugs")
-    compare_mode = st.checkbox("Compare against a second drug")
+        st.metric("Calculated loading dose", str(round(loading_dose, 1)) + " mg")
+        st.caption("Loading dose = target concentration × volume of distribution")
 
-    if compare_mode:
-        selected_drug_2 = st.selectbox("Drug 2", list(drug_presets.keys()), index=1)
-        preset_2 = drug_presets[selected_drug_2]
-        ka_2 = preset_2["ka"]
-        k_2 = preset_2["k"]
-        k_2_adjusted = k_2 * kidney_multiplier
+    with tab_compare:
+        compare_mode = st.checkbox("Compare against a second drug")
 
-    st.subheader("Therapeutic window (Drug 1)")
-    therapeutic_min = st.slider("Minimum (mg/L)", min_value=0.0, max_value=50.0, value=float(preset["therapeutic_min"]))
-    therapeutic_max = st.slider("Maximum (mg/L)", min_value=0.0, max_value=100.0, value=float(preset["therapeutic_max"]))
+        if compare_mode:
+            selected_drug_2 = st.selectbox("Drug 2", list(drug_presets.keys()), index=1)
+            preset_2 = drug_presets[selected_drug_2]
+            ka_2 = preset_2["ka"]
+            k_2 = preset_2["k"]
+            k_2_adjusted = k_2 * kidney_multiplier
 
-if route == "Oral":
+    with tab_window:
+        therapeutic_min = st.slider("Minimum (mg/L)", min_value=0.0, max_value=50.0, value=float(preset["therapeutic_min"]))
+        therapeutic_max = st.slider("Maximum (mg/L)", min_value=0.0, max_value=100.0, value=float(preset["therapeutic_max"]))
+
+if model_type == "Two-compartment":
+    times_list, blood_list, peak_per_dose = compute_two_compartment_curve(route, ka, k_adjusted, k12, k21, volume_central, dose_amount, dose_interval, num_doses)
+elif route == "Oral":
     times_list, blood_list, peak_per_dose = compute_pk_curve_oral(ka, k_adjusted, dose_amount, dose_interval, num_doses)
 else:
     times_list, blood_list, peak_per_dose = compute_pk_curve_iv(k_adjusted, dose_amount, dose_interval, num_doses)
 
 if compare_mode:
-    if route == "Oral":
+    if model_type == "Two-compartment":
+        times_list_2, blood_list_2, peak_per_dose_2 = compute_two_compartment_curve(route, ka_2, k_2_adjusted, k12, k21, volume_central, dose_amount, dose_interval, num_doses)
+    elif route == "Oral":
         times_list_2, blood_list_2, peak_per_dose_2 = compute_pk_curve_oral(ka_2, k_2_adjusted, dose_amount, dose_interval, num_doses)
     else:
         times_list_2, blood_list_2, peak_per_dose_2 = compute_pk_curve_iv(k_2_adjusted, dose_amount, dose_interval, num_doses)
@@ -264,7 +333,7 @@ max_concentration, time_of_max, half_life, area_under_curve = compute_pk_metrics
 steady_state_dose_number, steady_state_time = find_steady_state_dose(peak_per_dose, dose_interval)
 
 with col2:
-    st.subheader(selected_drug + " (" + route + ") — blood concentration over time")
+    st.subheader(selected_drug + " (" + route + ", " + model_type + ") — blood concentration over time")
 
     figure = go.Figure()
 
@@ -312,4 +381,4 @@ with col2:
         max_concentration_2 = max(blood_list_2)
         st.info(explain_comparison(selected_drug, k_adjusted, selected_drug_2, k_2_adjusted, max_concentration, max_concentration_2))
     else:
-        st.info(explain_single_drug(selected_drug, route, max_concentration, therapeutic_min, therapeutic_max, kidney_function, dose_amount, dose_interval, num_doses, steady_state_dose_number, steady_state_time))
+        st.info(explain_single_drug(selected_drug, route, max_concentration, therapeutic_min, therapeutic_max, kidney_function, dose_amount, dose_interval, num_doses, steady_state_dose_number, steady_state_time, model_type))
